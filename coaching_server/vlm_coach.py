@@ -13,7 +13,6 @@ import asyncio
 import json
 import logging
 import time
-from collections import deque
 
 from google import genai
 from google.genai import types
@@ -31,8 +30,8 @@ USER_PROMPT_TEMPLATE = """\
 Current rep count: {rep_count}
 Exercise detected so far: {current_exercise}
 
-Body keypoints (normalized 0.0-1.0 coordinates, origin top-left, ~last 5 seconds of movement):
-{keypoints_json}
+Current body keypoints (normalized 0.0–1.0, origin top-left, only confident joints shown):
+{keypoints_compact}
 
 Based on the attached image and keypoints above:
 1. What exercise is this person performing?
@@ -54,14 +53,13 @@ class VLMCoach:
             "form_score": 0,
             "tip": "Waiting for analysis...",
         }
-        # Rolling buffer of recent keypoint frames for context
-        self._keypoint_buffer: deque[list[dict]] = deque(maxlen=50)
+        self._latest_keypoints: list[dict] = []
         self._latest_snapshot: bytes | None = None
 
     def ingest_frame(self, keypoints: list[dict], snapshot: bytes | None = None) -> None:
         """Feed a keypoint frame (and optional snapshot) into the buffer."""
         if keypoints:
-            self._keypoint_buffer.append(keypoints)
+            self._latest_keypoints = keypoints
         if snapshot is not None:
             self._latest_snapshot = snapshot
 
@@ -79,7 +77,7 @@ class VLMCoach:
             return None
         if self._latest_snapshot is None:
             return None
-        if not self._keypoint_buffer:
+        if not self._latest_keypoints:
             return None
 
         self._last_call = now
@@ -92,11 +90,27 @@ class VLMCoach:
             return None
 
     async def _call_vlm(self, rep_count: int, current_exercise: str) -> dict:
-        keypoints_json = json.dumps(list(self._keypoint_buffer)[-50:], indent=None)
+        # Use only the most recent keypoint frame for the prompt.
+        # The image carries visual/temporal context; we just need current joint positions
+        # for structural grounding. Sending all 50 buffered frames would add ~11k tokens
+        # of noise with negligible benefit.
+        latest_keypoints = self._latest_keypoints
+
+        # Compact format: only confident joints, name → [x, y] mapping.
+        # Filters out low-confidence keypoints to reduce noise.
+        keypoints_compact = json.dumps(
+            {
+                kp["name"]: [round(kp["x"], 3), round(kp["y"], 3)]
+                for kp in latest_keypoints
+                if kp.get("score", 0) >= 0.5
+            },
+            indent=None,
+        )
+
         prompt = USER_PROMPT_TEMPLATE.format(
             rep_count=rep_count,
             current_exercise=current_exercise,
-            keypoints_json=keypoints_json,
+            keypoints_compact=keypoints_compact,
         )
 
         contents = [
