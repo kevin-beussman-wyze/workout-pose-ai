@@ -116,18 +116,27 @@ async def process_frame(msg: dict) -> None:
 
     if not state.no_pose:
         state.latest_keypoints = keypoints
-        rep_count = state.rep_counter.update(keypoints)
+        state.rep_counter.update(keypoints)
         state.vlm_coach.ingest_frame(keypoints, snapshot)
-    else:
-        rep_count = state.rep_counter.rep_count
+
+    rc = state.rep_counter
+    vlm = state.vlm_coach.last_result
 
     await broadcast({
         "type": "frame",
         "keypoints": keypoints,
         "no_pose": state.no_pose,
-        "rep_count": rep_count,
-        "exercise": state.rep_counter.exercise,
-        "vlm": state.vlm_coach.last_result,
+        # Live estimate: pending reps under the current motion hint
+        "pending_reps": rc.pending_reps,
+        "motion_hint": rc.exercise,
+        # Confirmed totals: authoritative per-exercise rep counts from VLM
+        "confirmed_totals": rc.confirmed_totals,
+        "total_reps": rc.total_reps,
+        "vlm": {
+            "exercise": vlm.exercise,
+            "form_score": vlm.form_score,
+            "tip": vlm.tip,
+        },
     })
 
 
@@ -139,19 +148,20 @@ async def vlm_scheduler() -> None:
             if state.no_pose:
                 continue
             result = await state.vlm_coach.maybe_call(
-                rep_count=state.rep_counter.rep_count,
-                current_exercise=state.rep_counter.exercise,
+                pending_reps=state.rep_counter.pending_reps,
             )
             if result:
-                new_exercise = result.get("exercise", "unknown")
-                state.rep_counter.set_exercise(new_exercise)
-                tip = result.get("tip", "")
-                if tip and (not state.tip_history or state.tip_history[-1] != tip):
-                    state.tip_history.append(tip)
-                log.info("VLM: exercise=%s form=%s tip=%s",
-                         result.get("exercise"), result.get("form_score"), tip)
+                # Retroactively assign pending reps to VLM's exercise label
+                state.rep_counter.confirm_window(result.exercise)
+                if result.tip and (not state.tip_history or state.tip_history[-1] != result.tip):
+                    state.tip_history.append(result.tip)
+                log.info(
+                    "VLM confirmed: exercise=%s form=%d tip=%s",
+                    result.exercise, result.form_score, result.tip,
+                )
     except asyncio.CancelledError:
         pass
+
 
 
 # --- WebSocket broadcast ---

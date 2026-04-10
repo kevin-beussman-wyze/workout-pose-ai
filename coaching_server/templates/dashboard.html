@@ -79,19 +79,53 @@
 
     /* Exercise badge */
     #exercise-name {
-      font-size: 26px;
+      font-size: 22px;
       font-weight: 700;
       color: #fff;
       text-transform: capitalize;
     }
 
-    /* Rep counter */
-    #rep-count {
-      font-size: 80px;
+    #pending-label {
+      font-size: 10px;
+      color: #444;
+      font-weight: 400;
+      text-transform: none;
+      letter-spacing: 0;
+    }
+
+    /* Pending rep count */
+    #pending-count {
+      font-size: 64px;
       font-weight: 800;
       line-height: 1;
+      color: #aaa;
+      letter-spacing: -3px;
+    }
+
+    /* Confirmed totals per exercise */
+    #totals-list {
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+    }
+    .totals-empty {
+      color: #444;
+      font-size: 13px;
+    }
+    .totals-row {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      font-size: 15px;
+    }
+    .totals-exercise {
+      color: #aaa;
+      text-transform: capitalize;
+    }
+    .totals-reps {
+      font-size: 22px;
+      font-weight: 700;
       color: #fff;
-      letter-spacing: -4px;
     }
 
     /* Form score */
@@ -170,13 +204,20 @@
   <!-- Sidebar metrics -->
   <div id="sidebar">
     <div class="card">
-      <div class="card-label">Exercise</div>
+      <div class="card-label">Exercise (motion hint)</div>
       <div id="exercise-name">—</div>
     </div>
 
     <div class="card">
-      <div class="card-label">Reps</div>
-      <div id="rep-count">0</div>
+      <div class="card-label">Pending reps <span id="pending-label">(estimating…)</span></div>
+      <div id="pending-count">0</div>
+    </div>
+
+    <div class="card" id="totals-card">
+      <div class="card-label">Confirmed reps by exercise</div>
+      <div id="totals-list">
+        <div class="totals-empty">No confirmed reps yet</div>
+      </div>
     </div>
 
     <div class="card">

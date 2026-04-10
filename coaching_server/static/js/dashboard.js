@@ -33,7 +33,9 @@ const canvas    = document.getElementById("skeleton-canvas");
 const ctx       = canvas.getContext("2d");
 const noPoseBadge    = document.getElementById("no-pose-badge");
 const exerciseEl     = document.getElementById("exercise-name");
-const repCountEl     = document.getElementById("rep-count");
+const pendingCountEl = document.getElementById("pending-count");
+const pendingLabelEl = document.getElementById("pending-label");
+const totalsListEl   = document.getElementById("totals-list");
 const formScoreEl    = document.getElementById("form-score");
 const formBarFill    = document.getElementById("form-bar-fill");
 const tipsList       = document.getElementById("tips-list");
@@ -91,12 +93,36 @@ function drawSkeleton(keypoints, noPose) {
 }
 
 // ---- Metrics updates ----
-function updateExercise(name) {
-  exerciseEl.textContent = name.replace(/_/g, " ") || "—";
+function updateExercise(motionHint, vlmExercise) {
+  // Show motion hint as real-time indicator; VLM label in parens if different
+  let label = (motionHint || "—").replace(/_/g, " ");
+  if (vlmExercise && vlmExercise !== "other" && vlmExercise !== motionHint) {
+    label += ` <span style="color:#555;font-size:14px;font-weight:400">(VLM: ${vlmExercise.replace(/_/g, " ")})</span>`;
+  }
+  exerciseEl.innerHTML = label;
 }
 
-function updateRepCount(count) {
-  repCountEl.textContent = count;
+function updatePendingReps(count, motionHint) {
+  pendingCountEl.textContent = count;
+  pendingLabelEl.textContent = motionHint
+    ? `(live · ${motionHint.replace(/_/g, " ")})`
+    : "(estimating…)";
+}
+
+function updateConfirmedTotals(totals) {
+  const entries = Object.entries(totals || {}).filter(([, v]) => v > 0);
+  if (entries.length === 0) {
+    totalsListEl.innerHTML = '<div class="totals-empty">No confirmed reps yet</div>';
+    return;
+  }
+  totalsListEl.innerHTML = entries
+    .sort((a, b) => b[1] - a[1])
+    .map(([exercise, reps]) => `
+      <div class="totals-row">
+        <span class="totals-exercise">${exercise.replace(/_/g, " ")}</span>
+        <span class="totals-reps">${reps}</span>
+      </div>`)
+    .join("");
 }
 
 function updateFormScore(score) {
@@ -174,13 +200,14 @@ function connect() {
 
     drawSkeleton(data.keypoints, data.no_pose);
     noPoseBadge.style.display = data.no_pose ? "block" : "none";
-    updateRepCount(data.rep_count ?? 0);
-    updateExercise(data.exercise ?? "unknown");
 
-    if (data.vlm) {
-      updateFormScore(data.vlm.form_score);
-      addTip(data.vlm.tip);
-    }
+    const vlm = data.vlm || {};
+    updateExercise(data.motion_hint, vlm.exercise);
+    updatePendingReps(data.pending_reps ?? 0, data.motion_hint);
+    updateConfirmedTotals(data.confirmed_totals);
+
+    if (vlm.form_score) updateFormScore(vlm.form_score);
+    if (vlm.tip) addTip(vlm.tip);
   };
 }
 

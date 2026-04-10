@@ -1,8 +1,8 @@
 """
 coaching_server/vlm_coach.py
 
-Schedules periodic Gemini calls with the latest keypoint window + JPEG snapshot.
-Returns exercise type, form score, and coaching tip as structured data.
+Schedules periodic Gemini calls with the latest keypoint snapshot.
+Returns structured coaching results via Gemini's JSON schema enforcement.
 
 Uses the Google Gen AI SDK (google-genai) with a Vertex AI backend.
 Authentication is handled via Application Default Credentials (ADC):
@@ -13,34 +13,46 @@ import asyncio
 import json
 import logging
 import time
+from typing import Annotated, Literal
 
 from google import genai
 from google.genai import types
+from pydantic import BaseModel, Field
 
 log = logging.getLogger(__name__)
 
 MODEL = "gemini-2.0-flash-lite"
 
+# Canonical exercise names — used by both VLM output and RepCounter joint map.
+# "other" catches exercises outside the supported set without hallucinating a label.
+ExerciseType = Literal[
+    "squat", "push-up", "jumping_jack", "sit-up", "plank", "lunge", "other"
+]
+
+
+class CoachingResult(BaseModel):
+    exercise: ExerciseType
+    form_score: Annotated[int, Field(ge=1, le=10)]
+    tip: str
+
+
 SYSTEM_PROMPT = (
-    "You are an expert fitness coach analyzing calisthenics exercises from video frames. "
-    "You receive body keypoint data and an image. Respond concisely and accurately."
+    "You are an expert fitness coach analyzing a calisthenics workout session. "
+    "You receive a body keypoint map and a video frame image. "
+    "Respond concisely and accurately."
 )
 
 USER_PROMPT_TEMPLATE = """\
-Current rep count: {rep_count}
-Exercise detected so far: {current_exercise}
+Current rep count this window: {rep_count}
 
-Current body keypoints (normalized 0.0–1.0, origin top-left, only confident joints shown):
+Current body keypoints (normalized 0.0–1.0, origin top-left, only confident joints):
 {keypoints_compact}
 
-Based on the attached image and keypoints above:
-1. What exercise is this person performing?
-   Choose exactly one: squat, push-up, jumping_jack, sit-up, plank, lunge, or unknown
-2. Rate their current form 1-10 (10 = textbook perfect).
-3. Give ONE specific, actionable coaching tip (max 2 sentences).
-
-Respond ONLY with valid JSON, no markdown:
-{{"exercise": "...", "form_score": <integer 1-10>, "tip": "..."}}"""
+Based on the attached image and keypoints:
+1. What calisthenics exercise is this person performing right now?
+2. Rate their current form 1–10 (10 = textbook perfect).
+3. Give ONE specific, actionable coaching tip (max 2 sentences).\
+"""
 
 
 class VLMCoach:
@@ -48,103 +60,77 @@ class VLMCoach:
         self._client = genai.Client(vertexai=True, project=project, location=location)
         self._interval = interval_seconds
         self._last_call: float = 0.0
-        self._last_result: dict = {
-            "exercise": "unknown",
-            "form_score": 0,
-            "tip": "Waiting for analysis...",
-        }
+        self._last_result: CoachingResult = CoachingResult(
+            exercise="other",
+            form_score=5,
+            tip="Waiting for analysis...",
+        )
         self._latest_keypoints: list[dict] = []
         self._latest_snapshot: bytes | None = None
 
     def ingest_frame(self, keypoints: list[dict], snapshot: bytes | None = None) -> None:
-        """Feed a keypoint frame (and optional snapshot) into the buffer."""
         if keypoints:
             self._latest_keypoints = keypoints
         if snapshot is not None:
             self._latest_snapshot = snapshot
 
     @property
-    def last_result(self) -> dict:
+    def last_result(self) -> CoachingResult:
         return self._last_result
 
-    async def maybe_call(self, rep_count: int, current_exercise: str) -> dict | None:
+    async def maybe_call(self, pending_reps: int) -> CoachingResult | None:
         """
-        Call Gemini if the interval has elapsed and a snapshot is available.
-        Returns the new result dict, or None if no call was made.
+        Call Gemini if the interval has elapsed and data is available.
+        Returns a validated CoachingResult, or None if no call was made.
         """
         now = time.time()
         if now - self._last_call < self._interval:
             return None
-        if self._latest_snapshot is None:
-            return None
-        if not self._latest_keypoints:
+        if self._latest_snapshot is None or not self._latest_keypoints:
             return None
 
         self._last_call = now
         try:
-            result = await self._call_vlm(rep_count, current_exercise)
+            result = await self._call_vlm(pending_reps)
             self._last_result = result
             return result
         except Exception as exc:
             log.warning("VLM call failed: %s — retaining last result", exc)
             return None
 
-    async def _call_vlm(self, rep_count: int, current_exercise: str) -> dict:
-        # Use only the most recent keypoint frame for the prompt.
-        # The image carries visual/temporal context; we just need current joint positions
-        # for structural grounding. Sending all 50 buffered frames would add ~11k tokens
-        # of noise with negligible benefit.
-        latest_keypoints = self._latest_keypoints
-
-        # Compact format: only confident joints, name → [x, y] mapping.
-        # Filters out low-confidence keypoints to reduce noise.
+    async def _call_vlm(self, pending_reps: int) -> CoachingResult:
         keypoints_compact = json.dumps(
             {
                 kp["name"]: [round(kp["x"], 3), round(kp["y"], 3)]
-                for kp in latest_keypoints
+                for kp in self._latest_keypoints
                 if kp.get("score", 0) >= 0.5
             },
             indent=None,
         )
 
         prompt = USER_PROMPT_TEMPLATE.format(
-            rep_count=rep_count,
-            current_exercise=current_exercise,
+            rep_count=pending_reps,
             keypoints_compact=keypoints_compact,
         )
 
-        contents = [
-            types.Part(
-                inline_data=types.Blob(
-                    mime_type="image/jpeg",
-                    data=self._latest_snapshot,
-                )
-            ),
-            types.Part(text=prompt),
-        ]
-
-        # google-genai async API
         response = await asyncio.to_thread(
             self._client.models.generate_content,
             model=MODEL,
-            contents=contents,
+            contents=[
+                types.Part(
+                    inline_data=types.Blob(mime_type="image/jpeg", data=self._latest_snapshot)
+                ),
+                types.Part(text=prompt),
+            ],
             config=types.GenerateContentConfig(
                 system_instruction=SYSTEM_PROMPT,
+                response_mime_type="application/json",
+                response_schema=CoachingResult,
                 max_output_tokens=200,
                 temperature=0.2,
             ),
         )
 
-        raw = response.text.strip()
-        # Strip markdown code fences if model wraps response despite instructions
-        if raw.startswith("```"):
-            raw = raw.split("```")[1]
-            if raw.startswith("json"):
-                raw = raw[4:]
+        return CoachingResult.model_validate_json(response.text)
 
-        parsed = json.loads(raw)
-        # Validate expected fields; raise on malformed so caller retains last result
-        assert "exercise" in parsed and "form_score" in parsed and "tip" in parsed
-        parsed["form_score"] = int(parsed["form_score"])
-        return parsed
 
