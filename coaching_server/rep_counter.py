@@ -79,24 +79,27 @@ class RepCounter:
     # VLM interface                                                        #
     # ------------------------------------------------------------------ #
 
-    def confirm_window(self, vlm_exercise: str) -> None:
+    def confirm_window(self, segments: list) -> None:
         """
-        Called by the VLM scheduler with an authoritative exercise label.
-        Retroactively assigns all pending_reps to vlm_exercise, then resets
-        the window. This is the only place confirmed_totals is written.
+        Called by the VLM scheduler with a list of ExerciseSegment objects.
+        The LLM has counted reps directly from the keypoint time series, so
+        we use its counts as authoritative and discard pending_reps entirely.
         """
-        if self.pending_reps > 0:
-            self.confirmed_totals[vlm_exercise] = (
-                self.confirmed_totals.get(vlm_exercise, 0) + self.pending_reps
-            )
-            self.archived_sets.append({
-                "exercise": vlm_exercise,
-                "reps": self.pending_reps,
-            })
+        for seg in segments:
+            if seg.reps > 0:
+                self.confirmed_totals[seg.exercise] = (
+                    self.confirmed_totals.get(seg.exercise, 0) + seg.reps
+                )
+                self.archived_sets.append({
+                    "exercise": seg.exercise,
+                    "reps": seg.reps,
+                })
+        # Reset pending window; align hint to last segment's exercise
         self.pending_reps = 0
-        # Align hint so it needs HINT_CONFIRM frames to disagree with VLM
-        self._current_hint = vlm_exercise
-        self._hint_stable_frames = 0
+        if segments:
+            self._current_hint = segments[-1].exercise
+            self.exercise = segments[-1].exercise
+            self._hint_stable_frames = 0
 
     @property
     def total_reps(self) -> int:

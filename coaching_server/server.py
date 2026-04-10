@@ -120,7 +120,8 @@ async def process_frame(msg: dict) -> None:
         state.vlm_coach.ingest_frame(keypoints, snapshot)
 
     rc = state.rep_counter
-    vlm = state.vlm_coach.last_result
+    # Last segment from most recent VLM result (for form score / tip display)
+    last_seg = state.vlm_coach.last_result.segments[-1] if state.vlm_coach.last_result.segments else None
 
     await broadcast({
         "type": "frame",
@@ -129,13 +130,13 @@ async def process_frame(msg: dict) -> None:
         # Live estimate: pending reps under the current motion hint
         "pending_reps": rc.pending_reps,
         "motion_hint": rc.exercise,
-        # Confirmed totals: authoritative per-exercise rep counts from VLM
+        # Confirmed totals: authoritative per-exercise rep counts from LLM
         "confirmed_totals": rc.confirmed_totals,
         "total_reps": rc.total_reps,
         "vlm": {
-            "exercise": vlm.exercise,
-            "form_score": vlm.form_score,
-            "tip": vlm.tip,
+            "exercise": last_seg.exercise if last_seg else "other",
+            "form_score": last_seg.form_score if last_seg else 5,
+            "tip": last_seg.tip if last_seg else "",
         },
     })
 
@@ -151,16 +152,20 @@ async def vlm_scheduler() -> None:
                 pending_reps=state.rep_counter.pending_reps,
             )
             if result:
-                # Retroactively assign pending reps to VLM's exercise label
-                state.rep_counter.confirm_window(result.exercise)
-                if result.tip and (not state.tip_history or state.tip_history[-1] != result.tip):
-                    state.tip_history.append(result.tip)
+                # LLM counted reps per segment from the keypoint time series
+                state.rep_counter.confirm_window(result.segments)
+                # Add all unique tips from this call
+                for seg in result.segments:
+                    if seg.tip and (not state.tip_history or state.tip_history[-1] != seg.tip):
+                        state.tip_history.append(seg.tip)
                 log.info(
-                    "VLM confirmed: exercise=%s form=%d tip=%s",
-                    result.exercise, result.form_score, result.tip,
+                    "LLM confirmed %d segment(s): %s",
+                    len(result.segments),
+                    [(s.exercise, s.reps) for s in result.segments],
                 )
     except asyncio.CancelledError:
         pass
+
 
 
 

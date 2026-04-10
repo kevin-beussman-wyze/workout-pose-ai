@@ -1,7 +1,8 @@
 """
 coaching_server/vlm_coach.py
 
-Schedules periodic Gemini calls with a rolling window of keypoint snapshots.
+Schedules periodic Gemini calls with a keypoint time series + single grounding image.
+The LLM classifies exercise segments and counts reps from the structured pose data.
 Returns structured coaching results via Gemini's JSON schema enforcement.
 
 Uses the Google Gen AI SDK (google-genai) with a Vertex AI backend.
@@ -24,46 +25,53 @@ log = logging.getLogger(__name__)
 
 MODEL = "gemini-2.0-flash-lite"
 
-# Number of snapshots to buffer and send per VLM call.
-# At one snapshot every 0.5s, SNAPSHOT_BUFFER_SIZE=10 covers the full 5s window.
-# We subsample to SNAPSHOT_SEND_COUNT evenly-spaced frames to keep token cost low.
-SNAPSHOT_BUFFER_SIZE = 12   # store up to 6 seconds of snapshots
-SNAPSHOT_SEND_COUNT  = 5    # send this many frames per call (~1s apart in a 5s window)
+# Keypoint frames to buffer (at 10fps, 60 frames = 6s window)
+KP_BUFFER_SIZE = 60
+# Subsample to this many frames for the LLM prompt (~3fps over 5s = 15 frames)
+KP_SEND_COUNT = 15
 
-# Canonical exercise names — used by both VLM output and RepCounter joint map.
-# "other" catches exercises outside the supported set without hallucinating a label.
+# Canonical exercise names used by both LLM output and RepCounter.
 ExerciseType = Literal[
     "squat", "push-up", "jumping_jack", "sit-up", "plank", "lunge", "other"
 ]
 
 
-class CoachingResult(BaseModel):
+class ExerciseSegment(BaseModel):
     exercise: ExerciseType
+    reps: Annotated[int, Field(ge=0)]
     form_score: Annotated[int, Field(ge=1, le=10)]
     tip: str
 
 
-SYSTEM_PROMPT = (
-    "You are an expert fitness coach analyzing a calisthenics workout session. "
-    "You receive a sequence of video frames (oldest to newest) covering the last ~5 seconds, "
-    "plus the current body keypoints from the most recent frame. "
-    "Use the full sequence to understand motion and detect exercise transitions. "
-    "Respond concisely and accurately."
-)
+class CoachingResult(BaseModel):
+    segments: list[ExerciseSegment]
+
+
+SYSTEM_PROMPT = """\
+You are an expert fitness coach analyzing a calisthenics workout session.
+
+You receive:
+1. A time series of body keypoint frames (normalized 0.0–1.0 coordinates, sampled at ~3fps).
+   Each frame is {"t": <relative_seconds>, "kp": {joint_name: [x, y], ...}}.
+2. A single grounding image of the most recent frame.
+
+Your job:
+- Identify one or more exercise segments in the keypoint sequence.
+- For each segment, count completed reps by analyzing joint motion patterns.
+  Rep patterns: push-up = shoulder Y oscillates; squat/lunge = hip/knee Y oscillates;
+  jumping_jack = wrists spread apart and return; sit-up = shoulder Y rises toward hip.
+  plank = body held still in low position.
+- Score form and give a coaching tip for each segment.
+
+If the exercise was consistent across the whole window, output a single segment.
+If the exercise changed mid-window, output multiple segments in time order.
+"""
 
 USER_PROMPT_TEMPLATE = """\
-Pending reps counted this window: {rep_count}
+Keypoint time series ({frame_count} frames, ~{window_seconds:.1f}s window):
+{keypoints_series}
 
-Body keypoints from the most recent frame (normalized 0.0–1.0, confident joints only):
-{keypoints_compact}
-
-The {frame_count} images above are equally-spaced frames from the last ~5 seconds (oldest → newest).
-
-Based on this sequence:
-1. What calisthenics exercise is this person performing in the MOST RECENT frame?
-   (If the exercise changed during the sequence, classify the current state.)
-2. Rate their current form 1–10 (10 = textbook perfect).
-3. Give ONE specific, actionable coaching tip (max 2 sentences).\
+Classify exercises and count reps from the motion patterns above.\
 """
 
 
@@ -73,23 +81,31 @@ class VLMCoach:
         self._interval = interval_seconds
         self._last_call: float = 0.0
         self._last_result: CoachingResult = CoachingResult(
-            exercise="other",
-            form_score=5,
-            tip="Waiting for analysis...",
+            segments=[ExerciseSegment(
+                exercise="other", reps=0, form_score=5, tip="Waiting for analysis..."
+            )]
         )
-        self._latest_keypoints: list[dict] = []
-        # Rolling buffer of (timestamp, jpeg_bytes) tuples
-        self._snapshot_buffer: deque[tuple[float, bytes]] = deque(maxlen=SNAPSHOT_BUFFER_SIZE)
+        # Rolling buffer of (timestamp, keypoints) tuples
+        self._kp_buffer: deque[tuple[float, list[dict]]] = deque(maxlen=KP_BUFFER_SIZE)
+        # Single grounding image (latest snapshot)
+        self._latest_snapshot: bytes | None = None
 
     def ingest_frame(self, keypoints: list[dict], snapshot: bytes | None = None) -> None:
         if keypoints:
-            self._latest_keypoints = keypoints
+            self._kp_buffer.append((time.time(), keypoints))
         if snapshot is not None:
-            self._snapshot_buffer.append((time.time(), snapshot))
+            self._latest_snapshot = snapshot
 
     @property
     def last_result(self) -> CoachingResult:
         return self._last_result
+
+    @property
+    def current_exercise(self) -> ExerciseType:
+        """Exercise from the most recent segment."""
+        if self._last_result.segments:
+            return self._last_result.segments[-1].exercise
+        return "other"
 
     async def maybe_call(self, pending_reps: int) -> CoachingResult | None:
         """
@@ -99,55 +115,65 @@ class VLMCoach:
         now = time.time()
         if now - self._last_call < self._interval:
             return None
-        if not self._snapshot_buffer or not self._latest_keypoints:
+        if not self._kp_buffer:
             return None
 
         self._last_call = now
         try:
-            result = await self._call_vlm(pending_reps)
+            result = await self._call_vlm()
             self._last_result = result
             return result
         except Exception as exc:
             log.warning("VLM call failed: %s — retaining last result", exc)
             return None
 
-    def _select_snapshots(self) -> list[bytes]:
+    def _build_keypoint_series(self) -> tuple[str, float]:
         """
-        Pick SNAPSHOT_SEND_COUNT evenly-spaced frames from the buffer.
-        Always includes the most recent frame.
+        Subsample KP_SEND_COUNT evenly-spaced frames from the buffer.
+        Returns (compact JSON string, window duration in seconds).
         """
-        buf = list(self._snapshot_buffer)
-        if len(buf) <= SNAPSHOT_SEND_COUNT:
-            return [jpeg for _, jpeg in buf]
-        # Evenly-spaced indices across the buffer, always including the last
-        step = (len(buf) - 1) / (SNAPSHOT_SEND_COUNT - 1)
-        indices = {round(i * step) for i in range(SNAPSHOT_SEND_COUNT)}
-        indices.add(len(buf) - 1)
-        return [buf[i][1] for i in sorted(indices)]
+        buf = list(self._kp_buffer)
+        if not buf:
+            return "[]", 0.0
 
-    async def _call_vlm(self, pending_reps: int) -> CoachingResult:
-        snapshots = self._select_snapshots()
+        # Evenly-spaced indices, always including first and last
+        n = len(buf)
+        if n <= KP_SEND_COUNT:
+            indices = list(range(n))
+        else:
+            step = (n - 1) / (KP_SEND_COUNT - 1)
+            indices = sorted({round(i * step) for i in range(KP_SEND_COUNT)})
+            indices[-1] = n - 1  # ensure last frame always included
 
-        keypoints_compact = json.dumps(
-            {
+        t0 = buf[0][0]
+        frames = []
+        for i in indices:
+            ts, kps = buf[i]
+            confident = {
                 kp["name"]: [round(kp["x"], 3), round(kp["y"], 3)]
-                for kp in self._latest_keypoints
+                for kp in kps
                 if kp.get("score", 0) >= 0.5
-            },
-            indent=None,
-        )
+            }
+            frames.append({"t": round(ts - t0, 2), "kp": confident})
+
+        window_seconds = buf[-1][0] - t0
+        return json.dumps(frames, separators=(",", ":")), window_seconds
+
+    async def _call_vlm(self) -> CoachingResult:
+        keypoints_series, window_seconds = self._build_keypoint_series()
 
         prompt = USER_PROMPT_TEMPLATE.format(
-            rep_count=pending_reps,
-            keypoints_compact=keypoints_compact,
-            frame_count=len(snapshots),
+            frame_count=min(len(self._kp_buffer), KP_SEND_COUNT),
+            window_seconds=window_seconds,
+            keypoints_series=keypoints_series,
         )
 
-        # Build contents: images first (oldest → newest), then the text prompt
-        contents: list[types.Part] = [
-            types.Part(inline_data=types.Blob(mime_type="image/jpeg", data=jpeg))
-            for jpeg in snapshots
-        ]
+        # Grounding image first (if available), then the keypoint text prompt
+        contents: list[types.Part] = []
+        if self._latest_snapshot is not None:
+            contents.append(
+                types.Part(inline_data=types.Blob(mime_type="image/jpeg", data=self._latest_snapshot))
+            )
         contents.append(types.Part(text=prompt))
 
         response = await asyncio.to_thread(
@@ -158,10 +184,11 @@ class VLMCoach:
                 system_instruction=SYSTEM_PROMPT,
                 response_mime_type="application/json",
                 response_schema=CoachingResult,
-                max_output_tokens=200,
+                max_output_tokens=400,
                 temperature=0.2,
             ),
         )
 
         return CoachingResult.model_validate_json(response.text)
+
 
