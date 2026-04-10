@@ -1,0 +1,47 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+dist/
+build/
+.eggs/
+*.egg
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Environment / secrets
+.env
+.env.*
+!.env.example
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Video / media (large files, use for local testing only)
+*.mp4
+*.mkv
+*.avi
+*.mov
+*.ts
+*.m3u8
+demo_video/
+
+# HLS segments
+seg*.ts
+stream.m3u8
+
+# Logs
+*.log

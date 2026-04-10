@@ -1,0 +1,200 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Workout Pose AI</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      background: #0a0a0a;
+      color: #f0f0f0;
+      font-family: "Inter", "Segoe UI", system-ui, sans-serif;
+      display: grid;
+      grid-template-columns: 1fr 340px;
+      grid-template-rows: 100vh;
+      overflow: hidden;
+    }
+
+    /* ---- Video + skeleton panel ---- */
+    #video-panel {
+      position: relative;
+      background: #000;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      overflow: hidden;
+    }
+
+    #video-feed {
+      width: 100%;
+      height: 100%;
+      object-fit: contain;
+    }
+
+    #skeleton-canvas {
+      position: absolute;
+      top: 0; left: 0;
+      width: 100%;
+      height: 100%;
+      pointer-events: none;
+    }
+
+    #no-pose-badge {
+      position: absolute;
+      top: 16px; left: 50%;
+      transform: translateX(-50%);
+      background: rgba(220, 50, 50, 0.85);
+      color: #fff;
+      font-size: 14px;
+      font-weight: 600;
+      padding: 6px 16px;
+      border-radius: 20px;
+      display: none;
+    }
+
+    /* ---- Sidebar ---- */
+    #sidebar {
+      background: #111;
+      border-left: 1px solid #222;
+      display: flex;
+      flex-direction: column;
+      gap: 0;
+      overflow: hidden;
+    }
+
+    .card {
+      padding: 20px;
+      border-bottom: 1px solid #222;
+    }
+
+    .card-label {
+      font-size: 11px;
+      text-transform: uppercase;
+      letter-spacing: 0.1em;
+      color: #555;
+      margin-bottom: 8px;
+    }
+
+    /* Exercise badge */
+    #exercise-name {
+      font-size: 26px;
+      font-weight: 700;
+      color: #fff;
+      text-transform: capitalize;
+    }
+
+    /* Rep counter */
+    #rep-count {
+      font-size: 80px;
+      font-weight: 800;
+      line-height: 1;
+      color: #fff;
+      letter-spacing: -4px;
+    }
+
+    /* Form score */
+    #form-score {
+      font-size: 48px;
+      font-weight: 700;
+    }
+    #form-score.low    { color: #e05050; }
+    #form-score.medium { color: #e0a030; }
+    #form-score.high   { color: #40c070; }
+
+    #form-bar-track {
+      background: #222;
+      height: 6px;
+      border-radius: 3px;
+      margin-top: 8px;
+    }
+    #form-bar-fill {
+      height: 6px;
+      border-radius: 3px;
+      width: 0%;
+      transition: width 0.4s ease, background 0.4s ease;
+    }
+
+    /* Coaching tips feed */
+    #tips-card {
+      flex: 1;
+      overflow: hidden;
+      display: flex;
+      flex-direction: column;
+    }
+    #tips-list {
+      flex: 1;
+      overflow-y: auto;
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+      padding: 0 20px 20px;
+    }
+    .tip-item {
+      background: #1a1a1a;
+      border-left: 3px solid #3a7bd5;
+      padding: 10px 12px;
+      font-size: 14px;
+      line-height: 1.5;
+      color: #ccc;
+      border-radius: 0 6px 6px 0;
+    }
+    .tip-item.latest {
+      border-left-color: #40c070;
+      color: #eee;
+    }
+
+    /* Status dot */
+    #status-dot {
+      position: absolute;
+      bottom: 12px;
+      right: 12px;
+      width: 10px; height: 10px;
+      border-radius: 50%;
+      background: #555;
+    }
+    #status-dot.connected { background: #40c070; }
+  </style>
+</head>
+<body>
+
+  <!-- Video + skeleton overlay -->
+  <div id="video-panel">
+    <img id="video-feed" src="{{ video_url }}" alt="Video feed" />
+    <canvas id="skeleton-canvas"></canvas>
+    <div id="no-pose-badge">No pose detected</div>
+    <div id="status-dot"></div>
+  </div>
+
+  <!-- Sidebar metrics -->
+  <div id="sidebar">
+    <div class="card">
+      <div class="card-label">Exercise</div>
+      <div id="exercise-name">—</div>
+    </div>
+
+    <div class="card">
+      <div class="card-label">Reps</div>
+      <div id="rep-count">0</div>
+    </div>
+
+    <div class="card">
+      <div class="card-label">Form score</div>
+      <div id="form-score" class="medium">—</div>
+      <div id="form-bar-track">
+        <div id="form-bar-fill"></div>
+      </div>
+    </div>
+
+    <div class="card tips-card" id="tips-card">
+      <div class="card-label" style="padding: 0 0 12px 0;">Coaching tips</div>
+      <div id="tips-list">
+        <div class="tip-item">Waiting for analysis…</div>
+      </div>
+    </div>
+  </div>
+
+  <script src="/static/js/dashboard.js" data-ws-url="{{ ws_url }}"></script>
+</body>
+</html>
