@@ -31,7 +31,7 @@ from fastapi.templating import Jinja2Templates
 from starlette.requests import Request
 
 from rep_counter import RepCounter
-from vlm_coach import VLMCoach
+from vlm_coach import VLMCoach, make_backend
 
 load_dotenv()
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [server] %(message)s")
@@ -41,11 +41,25 @@ log = logging.getLogger(__name__)
 CORAL_IP = os.getenv("CORAL_IP", "localhost")
 CORAL_ZMQ_PORT = int(os.getenv("CORAL_ZMQ_PORT", "5555"))
 RTSP_URL = os.getenv("RTSP_URL", "")
-GOOGLE_CLOUD_PROJECT = os.getenv("GOOGLE_CLOUD_PROJECT", "")
-GOOGLE_CLOUD_LOCATION = os.getenv("GOOGLE_CLOUD_LOCATION", "global")
 VLM_INTERVAL = float(os.getenv("VLM_INTERVAL_SECONDS", "5"))
 HOST = os.getenv("COACHING_HOST", "0.0.0.0")
 PORT = int(os.getenv("COACHING_PORT", "8000"))
+
+# LLM backend config — see vlm_coach.py for full documentation
+_LLM_BACKEND = os.getenv("LLM_BACKEND", "gemini").lower()
+_LLM_SETTINGS: dict = {"backend": _LLM_BACKEND}
+if _LLM_BACKEND == "gemini":
+    _LLM_SETTINGS.update({
+        "project":  os.getenv("GOOGLE_CLOUD_PROJECT", ""),
+        "location": os.getenv("GOOGLE_CLOUD_LOCATION", "global"),
+        "model":    os.getenv("GEMINI_MODEL", "gemini-2.0-flash-lite"),
+    })
+else:
+    _LLM_SETTINGS.update({
+        "base_url": os.getenv("OPENAI_BASE_URL", "http://localhost:8080/v1"),
+        "api_key":  os.getenv("OPENAI_API_KEY", "local"),
+        "model":    os.getenv("OPENAI_MODEL", ""),
+    })
 
 # Minimum keypoint confidence to consider a pose valid
 POSE_CONFIDENCE_THRESHOLD = 0.5
@@ -56,8 +70,7 @@ class AppState:
     def __init__(self) -> None:
         self.rep_counter = RepCounter()
         self.vlm_coach = VLMCoach(
-            project=GOOGLE_CLOUD_PROJECT,
-            location=GOOGLE_CLOUD_LOCATION,
+            backend=make_backend(_LLM_SETTINGS),
             interval_seconds=VLM_INTERVAL,
         )
         self.no_pose = True
