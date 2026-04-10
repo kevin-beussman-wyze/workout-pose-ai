@@ -5,7 +5,7 @@ FastAPI application. Runs on the laptop/server.
 
 - Subscribes to ZeroMQ keypoint stream from Coral publisher
 - Counts reps via RepCounter
-- Schedules VLM coaching calls via VLMCoach
+- Schedules VLM coaching calls via VLMCoach (Gemini via Vertex AI)
 - Serves MJPEG video feed from RTSP source via ffmpeg
 - Broadcasts live state to browser clients via WebSocket
 - Serves the dashboard HTML
@@ -41,7 +41,8 @@ log = logging.getLogger(__name__)
 CORAL_IP = os.getenv("CORAL_IP", "localhost")
 CORAL_ZMQ_PORT = int(os.getenv("CORAL_ZMQ_PORT", "5555"))
 RTSP_URL = os.getenv("RTSP_URL", "")
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
+GOOGLE_CLOUD_PROJECT = os.getenv("GOOGLE_CLOUD_PROJECT", "")
+GOOGLE_CLOUD_LOCATION = os.getenv("GOOGLE_CLOUD_LOCATION", "global")
 VLM_INTERVAL = float(os.getenv("VLM_INTERVAL_SECONDS", "5"))
 HOST = os.getenv("COACHING_HOST", "0.0.0.0")
 PORT = int(os.getenv("COACHING_PORT", "8000"))
@@ -54,7 +55,11 @@ POSE_CONFIDENCE_THRESHOLD = 0.5
 class AppState:
     def __init__(self) -> None:
         self.rep_counter = RepCounter()
-        self.vlm_coach = VLMCoach(api_key=OPENAI_API_KEY, interval_seconds=VLM_INTERVAL)
+        self.vlm_coach = VLMCoach(
+            project=GOOGLE_CLOUD_PROJECT,
+            location=GOOGLE_CLOUD_LOCATION,
+            interval_seconds=VLM_INTERVAL,
+        )
         self.no_pose = True
         self.clients: list[WebSocket] = []
         self.latest_keypoints: list[dict] = []

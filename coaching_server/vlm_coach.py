@@ -1,19 +1,26 @@
 """
 coaching_server/vlm_coach.py
 
-Schedules periodic GPT-4o calls with the latest keypoint window + JPEG snapshot.
+Schedules periodic Gemini calls with the latest keypoint window + JPEG snapshot.
 Returns exercise type, form score, and coaching tip as structured data.
+
+Uses the Google Gen AI SDK (google-genai) with a Vertex AI backend.
+Authentication is handled via Application Default Credentials (ADC):
+  gcloud auth application-default login
 """
 
-import base64
+import asyncio
 import json
 import logging
 import time
 from collections import deque
 
-from openai import AsyncOpenAI
+from google import genai
+from google.genai import types
 
 log = logging.getLogger(__name__)
+
+MODEL = "gemini-2.0-flash-lite"
 
 SYSTEM_PROMPT = (
     "You are an expert fitness coach analyzing calisthenics exercises from video frames. "
@@ -38,8 +45,8 @@ Respond ONLY with valid JSON, no markdown:
 
 
 class VLMCoach:
-    def __init__(self, api_key: str, interval_seconds: float = 5.0) -> None:
-        self._client = AsyncOpenAI(api_key=api_key)
+    def __init__(self, project: str, location: str, interval_seconds: float = 5.0) -> None:
+        self._client = genai.Client(vertexai=True, project=project, location=location)
         self._interval = interval_seconds
         self._last_call: float = 0.0
         self._last_result: dict = {
@@ -64,7 +71,7 @@ class VLMCoach:
 
     async def maybe_call(self, rep_count: int, current_exercise: str) -> dict | None:
         """
-        Call GPT-4o if the interval has elapsed and a snapshot is available.
+        Call Gemini if the interval has elapsed and a snapshot is available.
         Returns the new result dict, or None if no call was made.
         """
         now = time.time()
@@ -86,37 +93,35 @@ class VLMCoach:
 
     async def _call_vlm(self, rep_count: int, current_exercise: str) -> dict:
         keypoints_json = json.dumps(list(self._keypoint_buffer)[-50:], indent=None)
-        image_b64 = base64.b64encode(self._latest_snapshot).decode()
-
-        response = await self._client.chat.completions.create(
-            model="gpt-4o",
-            max_tokens=200,
-            messages=[
-                {"role": "system", "content": SYSTEM_PROMPT},
-                {
-                    "role": "user",
-                    "content": [
-                        {
-                            "type": "image_url",
-                            "image_url": {
-                                "url": f"data:image/jpeg;base64,{image_b64}",
-                                "detail": "low",
-                            },
-                        },
-                        {
-                            "type": "text",
-                            "content": USER_PROMPT_TEMPLATE.format(
-                                rep_count=rep_count,
-                                current_exercise=current_exercise,
-                                keypoints_json=keypoints_json,
-                            ),
-                        },
-                    ],
-                },
-            ],
+        prompt = USER_PROMPT_TEMPLATE.format(
+            rep_count=rep_count,
+            current_exercise=current_exercise,
+            keypoints_json=keypoints_json,
         )
 
-        raw = response.choices[0].message.content.strip()
+        contents = [
+            types.Part(
+                inline_data=types.Blob(
+                    mime_type="image/jpeg",
+                    data=self._latest_snapshot,
+                )
+            ),
+            types.Part(text=prompt),
+        ]
+
+        # google-genai async API
+        response = await asyncio.to_thread(
+            self._client.models.generate_content,
+            model=MODEL,
+            contents=contents,
+            config=types.GenerateContentConfig(
+                system_instruction=SYSTEM_PROMPT,
+                max_output_tokens=200,
+                temperature=0.2,
+            ),
+        )
+
+        raw = response.text.strip()
         # Strip markdown code fences if model wraps response despite instructions
         if raw.startswith("```"):
             raw = raw.split("```")[1]
@@ -128,3 +133,4 @@ class VLMCoach:
         assert "exercise" in parsed and "form_score" in parsed and "tip" in parsed
         parsed["form_score"] = int(parsed["form_score"])
         return parsed
+
